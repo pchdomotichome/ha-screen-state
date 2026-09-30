@@ -1,0 +1,171 @@
+# Automatizaciones de ejemplo para el estado de pantalla publicado por pc-screen-agent.
+#
+# La entidad es binary_sensor.<slug>_pantalla  (on = pantalla activa, off = apagada/suspendida).
+# Todos los ejemplos usan construcciones nativas de HA (sin plantillas) para que los
+# errores aparezcan al cargar la configuración y no en runtime.
+#
+# Reemplazá los entity_id por los tuyos.
+
+# ---------------------------------------------------------------- 1. Básico
+alias: Luces del escritorio según la pantalla
+description: >-
+  Las luces del escritorio siguen a la pantalla del PC.
+  Para encender sólo de noche, agregá 'condition: sun, after: sunset'
+  al bloque pantalla_on.
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.pc_pantalla
+    to: "on"
+    id: pantalla_on
+  - trigger: state
+    entity_id: binary_sensor.pc_pantalla
+    to: "off"
+    id: pantalla_off
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: pantalla_on
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: light.luces_escritorio
+      - conditions:
+          - condition: trigger
+            id: pantalla_off
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: light.luces_escritorio
+mode: single
+
+# ------------------------------------------------- 2. Sólo de noche (condición)
+# Encender únicamente si el sol está abajo; apagar siempre que la pantalla se apague.
+alias: Luces escritorio sólo de noche según pantalla
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.pc_pantalla
+    to: "on"
+    id: pantalla_on
+  - trigger: state
+    entity_id: binary_sensor.pc_pantalla
+    to: "off"
+    id: pantalla_off
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: pantalla_on
+          - condition: sun
+            after: sunset
+            before: sunrise
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: light.luces_escritorio
+      - conditions:
+          - condition: trigger
+            id: pantalla_off
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: light.luces_escritorio
+mode: single
+
+# ------------------------------------------------------- 3. Varios PCs a la vez
+# Un solo automation para todos los equipos: editá el mapeo y ya está.
+alias: Luces de escritorio por pantalla (varios equipos)
+description: Mapea cada equipo a su(s) luz(es). Agregá los equipos uno por uno.
+triggers:
+  - trigger: state
+    entity_id:
+      - binary_sensor.escritorio_pantalla
+      - binary_sensor.dormitorio_pantalla
+    id: pantalla
+conditions: []
+actions:
+  - variables:
+      mapeo:
+        - pantalla: binary_sensor.escritorio_pantalla
+          luces: light.luces_escritorio
+        - pantalla: binary_sensor.dormitorio_pantalla
+          luces: light.luces_dormitorio
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: pantalla
+        sequence:
+          - repeat:
+              for_each: "{{ mapeo }}"
+              sequence:
+                - choose:
+                    - conditions:
+                        - condition: state
+                          entity_id: "{{ repeat.item.pantalla }}"
+                          state: "on"
+                      sequence:
+                        - action: light.turn_on
+                          target:
+                            entity_id: "{{ repeat.item.luces }}"
+                    - conditions:
+                        - condition: state
+                          entity_id: "{{ repeat.item.pantalla }}"
+                          state: "off"
+                      sequence:
+                        - action: light.turn_off
+                          target:
+                            entity_id: "{{ repeat.item.luces }}"
+mode: single
+
+# ------------------------------------- 4. Respetar el apagado manual (restore)
+# Si apagás las luces a mano con la pantalla encendida, esta automatización no
+# las vuelve a encender: el helper guarda la "intención".
+#
+# Requisito: crear un helper input_boolean "luces_escritorio_deseadas"
+# (Configuración -> Dispositivos y servicios -> Ayudantes).
+alias: Luces escritorio - no forzar si las apagaste a mano
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.pc_pantalla
+    to: "on"
+    id: pantalla_on
+  - trigger: state
+    entity_id: binary_sensor.pc_pantalla
+    to: "off"
+    id: pantalla_off
+  - trigger: state
+    entity_id: input_boolean.luces_escritorio_deseadas
+    id: deseo_manual
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: pantalla_off
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: light.luces_escritorio
+      - conditions:
+          - condition: trigger
+            id: pantalla_on
+          - condition: state
+            entity_id: input_boolean.luces_escritorio_deseadas
+            state: "on"
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: light.luces_escritorio
+      - conditions:
+          - condition: trigger
+            id: deseo_manual
+          - condition: state
+            entity_id: input_boolean.luces_escritorio_deseadas
+            state: "on"
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: light.luces_escritorio
+mode: single

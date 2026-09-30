@@ -1,0 +1,15 @@
+[Unit]
+Description=pc-screen-agent — estado de la pantalla de esta PC para Home Assistant
+After=graphical-session.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/pc-screen-agent/agent.env
+ExecStart=/usr/bin/python3 %h/.local/share/pc-screen-agent/pc-screen-agent.py
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.local/share/pc-screen-agent/agent.log
+StandardError=append:%h/.local/share/pc-screen-agent/agent.log
+
+[Install]
+WantedBy=default.target

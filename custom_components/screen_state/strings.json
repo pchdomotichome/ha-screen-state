@@ -1,0 +1,38 @@
+{
+  "title": "Screen State",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Añadir un PC con pc-screen-agent",
+        "description": "Indicá la IP y el puerto del agente. El agente debe estar corriendo en ese equipo.",
+        "data": {
+          "slug": "Nombre corto del equipo",
+          "host": "IP o hostname del PC",
+          "port": "Puerto",
+          "token": "Token del agente (opcional)"
+        },
+        "data_description": {
+          "slug": "Se usa en el entity_id: binary_sensor.<slug>_pantalla",
+          "port": "Por defecto 8099",
+          "token": "Sólo si configuraste AGENT_TOKEN en el agente"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigurar el equipo",
+        "data": {
+          "host": "IP o hostname del PC",
+          "port": "Puerto",
+          "token": "Token del agente (opcional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No se pudo contactar al agente en /health",
+      "invalid_input": "Falta el nombre corto o la IP del equipo"
+    },
+    "abort": {
+      "already_configured": "Este equipo ya está configurado",
+      "reconfigure_successful": "Configuración actualizada"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "domain": "screen_state",
+  "name": "Screen State",
+  "codeowners": ["@pc-screen-agent"],
+  "config_flow": true,
+  "documentation": "https://github.com/pc-screen-agent/ha-screen-state",
+  "integration_type": "device",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/pc-screen-agent/ha-screen-state/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}

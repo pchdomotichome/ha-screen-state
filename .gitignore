@@ -1,0 +1,16 @@
+# Configuraciones locales con tokens: nunca al repo
+agent/agent.env
+*.env
+!agent/agent.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store
+*.swp
