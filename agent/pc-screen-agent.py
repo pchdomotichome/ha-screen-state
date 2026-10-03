@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover
         "Falta PyGObject (gi). Ejecútalo con el Python del sistema: /usr/bin/python3"
     )
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 log = logging.getLogger("pc-screen-agent")
 
 DEFAULTS = {
@@ -61,6 +61,7 @@ DEFAULTS = {
     "HA_HEARTBEAT": "300",
     "HA_TIMEOUT": "8",
     "DETECTORS": "gnome,logind",
+    "POLL_INTERVAL": "30",
     "LOG_LEVEL": "INFO",
 }
 
@@ -99,6 +100,7 @@ def load_config():
     cfg["PORT"] = int(cfg["AGENT_PORT"])
     cfg["HA_HEARTBEAT"] = max(30, int(cfg["HA_HEARTBEAT"]))
     cfg["HA_TIMEOUT"] = int(cfg["HA_TIMEOUT"])
+    cfg["POLL_INTERVAL"] = max(5, int(cfg["POLL_INTERVAL"]))
     cfg["SLUG"] = cfg["HOST_SLUG"].strip().lower().replace(" ", "_")
     cfg["LABEL"] = cfg["HOST_LABEL"] or cfg["SLUG"]
     cfg["ENTITY_ID"] = cfg["HA_ENTITY_ID"].strip() or "binary_sensor.%s_pantalla" % cfg["SLUG"]
@@ -120,6 +122,7 @@ class State:
         self.since = now_iso()
         self.reason = "inicio"
         self.started = time.monotonic()
+        self.detectors = {}  # {"gnome": True, "logind": True} -> qué detectores están vivos
         self._cond = threading.Condition()
 
     def snapshot(self):
@@ -134,6 +137,7 @@ class State:
             "version": VERSION,
             "uptime_s": int(time.monotonic() - self.started),
             "detectors": self.cfg["DETECTORS"],
+            "detectors_active": dict(sorted(self.detectors.items())),
             "friendly_name": "%s Pantalla" % self.cfg["LABEL"],
         }
 
@@ -225,6 +229,7 @@ class Publisher(threading.Thread):
                 "hostname": snap["hostname"],
                 "agent_version": snap["version"],
                 "uptime_s": snap["uptime_s"],
+                "detectors_active": snap["detectors_active"],
             },
         }
         req = urllib.request.Request(
@@ -342,14 +347,61 @@ class Agent:
     # ------------------------------------------------------------- detectores
 
     def setup_detectors(self):
-        detectors = self.cfg["DETECTORS"]
+        """Prepara cada detector por separado.
+
+        Un detector caído NO debe tumbar al resto ni dejar al agente mudo: cada
+        uno se reintenta en el ciclo de sondeo (y el sondeo cubre, además,
+        señales perdidas). Esto pasó tras un reinicio donde el bus de sesión
+        todavía no estaba listo y el agente quedó_reportando 'pantalla on'
+        para siempre sin detectar nada.
+        """
+        for name in self.cfg["DETECTORS"]:
+            self._setup_detector(name)
+        GLib.timeout_add_seconds(self.cfg["POLL_INTERVAL"], self._poll_screen)
+
+    def _setup_detector(self, name):
         try:
-            if "gnome" in detectors:
+            if name == "gnome":
                 self._setup_gnome()
-            if "logind" in detectors:
+            elif name == "logind":
                 self._setup_logind()
+            else:
+                log.warning("Detector desconocido en DETECTORS: %s", name)
         except Exception as exc:
-            log.error("Error preparando detectores: %s", exc)
+            self.state.detectors[name] = False
+            log.error(
+                "No se pudo activar el detector '%s': %s — reintento cada %ss",
+                name, exc, self.cfg["POLL_INTERVAL"])
+            if name == "gnome":
+                log.error("  -> sin GNOME no se detectan cambios de pantalla hasta que se reconecte")
+            elif name == "logind":
+                log.error("  -> sin logind no se reporta la suspensión del sistema")
+
+    def _poll_screen(self):
+        """Sondeo de seguridad: reconcilia el estado y reconecta detectores caídos."""
+        detectors = self.cfg["DETECTORS"]
+
+        if "gnome" in detectors:
+            if not self.state.detectors.get("gnome"):
+                # Reintento (por ejemplo tras reiniciar gnome-shell o la sesión)
+                self._setup_detector("gnome")
+            else:
+                try:
+                    res = self.session_bus.call_sync(
+                        "org.gnome.ScreenSaver", "/org/gnome/ScreenSaver",
+                        "org.gnome.ScreenSaver", "GetActive", None, None,
+                        Gio.DBusCallFlags.NONE, 5000, None)
+                    active = not bool(res.unpack()[0])
+                    if self.state.update(active=active, reason="sondeo"):
+                        self.publisher.notify("poll")
+                except Exception as exc:
+                    log.debug("Sondeo de pantalla falló, se reconecta: %s", exc)
+                    self.state.detectors["gnome"] = False
+
+        if "logind" in detectors and not self.state.detectors.get("logind"):
+            self._setup_detector("logind")
+
+        return GLib.SOURCE_CONTINUE
 
     def _setup_gnome(self):
         # OJO: hay que conservar la referencia a la conexión; si el objeto Gio
@@ -370,6 +422,7 @@ class Agent:
             callback=self._on_active_changed,
         )
         self.state.update(active=active, reason="arranque")
+        self.state.detectors["gnome"] = True
         log.info("Detector GNOME activo (pantalla=%s)", "on" if active else "off")
 
     def _on_active_changed(self, _conn, _sender, _path, _iface, _member, params):
@@ -394,6 +447,7 @@ class Agent:
             flags=Gio.DBusSignalFlags.NONE,
             callback=self._on_prepare_for_sleep,
         )
+        self.state.detectors["logind"] = True
         log.info("Detector logind (suspensión) activo")
 
     def _on_prepare_for_sleep(self, _conn, _sender, _path, _iface, _member, params):
@@ -446,6 +500,12 @@ def cmd_check(cfg):
     except Exception as exc:
         print("FALLO detectores: %s" % exc)
         return False
+
+    # Un detector caído es un problema real: el agente parece sano pero no ve nada.
+    for name in cfg["DETECTORS"]:
+        if not agent.state.detectors.get(name):
+            print("FALLO detector '%s' NO activo (no se detectarán sus eventos)" % name)
+            ok = False
 
     ok = True
     if cfg["HA_URL"] and cfg["HA_TOKEN"]:

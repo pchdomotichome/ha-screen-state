@@ -91,6 +91,7 @@ servicio de usuario, sin privilegios extra).
 | `AGENT_BIND` / `AGENT_PORT` | `0.0.0.0` / `8099` | Servidor HTTP/SSE |
 | `AGENT_TOKEN` | vacío | Bearer para `/state`, `/events`, `/health` |
 | `DETECTORS` | `gnome,logind` | Qué señales escuchar |
+| `POLL_INTERVAL` | `30` | Segundos del sondeo de seguridad (reconcilia estado y reconecta detectores) |
 | `LOG_LEVEL` | `INFO` | `DEBUG` para ver cada señal |
 
 ## API del agente
@@ -141,6 +142,27 @@ actions:
 Podés combinar con `condition: sun`, `condition: time` (con `weekday`),
 `condition: state` sobre otras entidades, o `condition: template` si necesitás
 lógica con los atributos (`active`, `suspended`, `reason`).
+
+## Diagnóstico
+
+`/state` incluye `detectors_active`. Si `gnome` está en `false`, el agente **no está
+detectando cambios de pantalla** aunque `/health` responda bien — la entidad en HA
+se queda congelada en el último valor y las automatizaciones no disparan:
+
+```bash
+curl -s http://127.0.0.1:8099/state | python3 -m json.tool | grep -A3 detectors_active
+```
+
+El agente reconecta solo los detectores caídos cada `POLL_INTERVAL` segundos, y los
+errores de arranque quedan en el log con la causa concreta:
+
+```bash
+grep -E "detector|No se pudo activar" ~/.local/share/pc-screen-agent/agent.log
+```
+
+En HA, el atributo `detectors_active` de la entidad permite montar un watchdog
+(un `binary_sensor` template con `device_class: problem` más una automatización que
+notifique cuando el agente queda sordo).
 
 ## Agregar otro equipo
 

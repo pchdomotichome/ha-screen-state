@@ -72,4 +72,8 @@ class ScreenStateBinarySensor(
             "hostname": data.get("hostname"),
             "host_slug": data.get("host_slug"),
             "uptime_s": data.get("uptime_s"),
+            # Salud del agente: si 'gnome' es False no se detectan cambios de
+            # pantalla. Sirve para montar un watchdog en HA.
+            "agent_version": data.get("version"),
+            "detectors_active": data.get("detectors_active"),
         }

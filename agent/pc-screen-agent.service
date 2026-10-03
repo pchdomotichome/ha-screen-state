@@ -1,6 +1,9 @@
 [Unit]
 Description=pc-screen-agent — estado de la pantalla de esta PC para Home Assistant
+# El detector de GNOME necesita el bus de sesión: arrancar después del graphical
+# session evita el arranque en frío. Si aun así falla, el agente reintenta solo.
 After=graphical-session.target
+Wants=graphical-session.target
 
 [Service]
 Type=simple
