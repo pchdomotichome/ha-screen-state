@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover
         "Falta PyGObject (gi). Ejecútalo con el Python del sistema: /usr/bin/python3"
     )
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 log = logging.getLogger("pc-screen-agent")
 
 DEFAULTS = {
@@ -62,6 +62,9 @@ DEFAULTS = {
     "HA_TIMEOUT": "8",
     "DETECTORS": "gnome,logind",
     "POLL_INTERVAL": "30",
+    "SCREEN_SOURCE": "auto",
+    "DPMS_POLL": "2",
+    "DPMS_SYSFS_ROOT": "/sys/class/drm",
     "LOG_LEVEL": "INFO",
 }
 
@@ -101,6 +104,8 @@ def load_config():
     cfg["HA_HEARTBEAT"] = max(30, int(cfg["HA_HEARTBEAT"]))
     cfg["HA_TIMEOUT"] = int(cfg["HA_TIMEOUT"])
     cfg["POLL_INTERVAL"] = max(5, int(cfg["POLL_INTERVAL"]))
+    cfg["DPMS_POLL"] = max(1, int(cfg["DPMS_POLL"]))
+    cfg["SCREEN_SOURCE"] = cfg["SCREEN_SOURCE"].strip().lower()
     cfg["SLUG"] = cfg["HOST_SLUG"].strip().lower().replace(" ", "_")
     cfg["LABEL"] = cfg["HOST_LABEL"] or cfg["SLUG"]
     cfg["ENTITY_ID"] = cfg["HA_ENTITY_ID"].strip() or "binary_sensor.%s_pantalla" % cfg["SLUG"]
@@ -122,7 +127,8 @@ class State:
         self.since = now_iso()
         self.reason = "inicio"
         self.started = time.monotonic()
-        self.detectors = {}  # {"gnome": True, "logind": True} -> qué detectores están vivos
+        self.locked = False           # sesión con candado (screensaver de GNOME)
+        self.detectors = {}  # {"gnome": True, "logind": True, "dpms": True} -> detectores vivos
         self._cond = threading.Condition()
 
     def snapshot(self):
@@ -130,6 +136,9 @@ class State:
             "state": "on" if self.active else "off",
             "active": self.active,
             "suspended": self.suspended,
+            "screen_power": "on" if self.active else "off",
+            "locked": self.locked,
+            "screen_source": self.cfg["SCREEN_SOURCE"],
             "since": self.since,
             "reason": self.reason,
             "host_slug": self.cfg["SLUG"],
@@ -140,6 +149,17 @@ class State:
             "detectors_active": dict(sorted(self.detectors.items())),
             "friendly_name": "%s Pantalla" % self.cfg["LABEL"],
         }
+
+    def update_locked(self, locked):
+        """Actualiza sólo el atributo 'locked' (no el estado principal)."""
+        with self._cond:
+            if bool(locked) == self.locked:
+                return False
+            self.locked = bool(locked)
+            payload = self.snapshot()
+            self._cond.notify_all()
+        log.debug("locked=%s", self.locked)
+        return True
 
     def update(self, active=None, suspended=None, reason=""):
         changed = False
@@ -230,6 +250,9 @@ class Publisher(threading.Thread):
                 "agent_version": snap["version"],
                 "uptime_s": snap["uptime_s"],
                 "detectors_active": snap["detectors_active"],
+                "locked": snap["locked"],
+                "screen_power": snap["screen_power"],
+                "screen_source": snap["screen_source"],
             },
         }
         req = urllib.request.Request(
@@ -245,6 +268,56 @@ class Publisher(threading.Thread):
         except Exception as exc:
             log.warning("No se pudo publicar en HA: %s", exc)
             return False
+
+
+# ------------------------------------------------------- estado de la pantalla (DPMS)
+
+
+class DpmsMonitor:
+    """Encendido/apagado FÍSICO de los monitores vía sysfs del driver DRM.
+
+    org.gnome.ScreenSaver responde 'activo' mientras la sesión esté bloqueada,
+    así que se congela hasta que el usuario escribe la contraseña. El estado
+    DPMS del kernel cambia en el instante en que el monitor se enciende, que es
+    justo lo que querés para las luces.
+
+    Devuelve None cuando no hay ningún conector conectado (no hay forma de
+    saberlo) para que el agente pueda caer al detector de GNOME.
+    """
+
+    def __init__(self, root):
+        self.root = root
+
+    def connectors(self):
+        """[(nombre, dpms)] de los conectores conectados."""
+        out = []
+        try:
+            names = sorted(os.listdir(self.root))
+        except OSError:
+            return out
+        for name in names:
+            if not name.startswith("card") or name.endswith("-Writeback-1"):
+                continue
+            path = os.path.join(self.root, name)
+            try:
+                with open(os.path.join(path, "status"), encoding="utf-8") as fh:
+                    if fh.read().strip() != "connected":
+                        continue
+                with open(os.path.join(path, "dpms"), encoding="utf-8") as fh:
+                    out.append((name, fh.read().strip()))
+            except OSError:
+                continue
+        return out
+
+    def any_on(self):
+        """True si algún monitor está encendido; None si no hay conectores."""
+        conns = self.connectors()
+        if not conns:
+            return None
+        return any(dpms == "On" for _, dpms in conns)
+
+    def detail(self):
+        return {name: dpms for name, dpms in self.connectors()}
 
 
 # ---------------------------------------------------------------- servidor HTTP
@@ -329,6 +402,7 @@ class Agent:
         self.state = State(cfg)
         self.publisher = Publisher(cfg, self.state)
         self.http = None
+        self.dpms = DpmsMonitor(cfg["DPMS_SYSFS_ROOT"])
         # Referencias a las conexiones DBus (mantenerlas vivas = mantener suscripciones)
         self.session_bus = None
         self.system_bus = None
@@ -358,6 +432,10 @@ class Agent:
         for name in self.cfg["DETECTORS"]:
             self._setup_detector(name)
         GLib.timeout_add_seconds(self.cfg["POLL_INTERVAL"], self._poll_screen)
+
+        # Estado físico del monitor (DPMS): es la fuente que no espera al desbloqueo
+        self._setup_dpms()
+        GLib.timeout_add_seconds(self.cfg["DPMS_POLL"], self._poll_dpms)
 
     def _setup_detector(self, name):
         try:
@@ -391,9 +469,13 @@ class Agent:
                         "org.gnome.ScreenSaver", "/org/gnome/ScreenSaver",
                         "org.gnome.ScreenSaver", "GetActive", None, None,
                         Gio.DBusCallFlags.NONE, 5000, None)
-                    active = not bool(res.unpack()[0])
-                    if self.state.update(active=active, reason="sondeo"):
-                        self.publisher.notify("poll")
+                    screensaver = bool(res.unpack()[0])
+                    self.state.update_locked(screensaver)
+                    # Sólo GNOME manda el estado principal si no hay DPMS: su
+                    # semántica es "candado puesto", no "monitor encendido".
+                    if not self.dpms_authoritative():
+                        if self.state.update(active=not screensaver, reason="sondeo"):
+                            self.publisher.notify("poll")
                 except Exception as exc:
                     log.debug("Sondeo de pantalla falló, se reconecta: %s", exc)
                     self.state.detectors["gnome"] = False
@@ -401,6 +483,46 @@ class Agent:
         if "logind" in detectors and not self.state.detectors.get("logind"):
             self._setup_detector("logind")
 
+        return GLib.SOURCE_CONTINUE
+
+    # ------------------------------------------------------------------ DPMS
+
+    def dpms_authoritative(self):
+        """True si el estado principal viene del DPMS y no del candado de GNOME."""
+        return bool(self.state.detectors.get("dpms")) and self.cfg["SCREEN_SOURCE"] in (
+            "auto", "dpms")
+
+    def _setup_dpms(self):
+        value = self.dpms.any_on()
+        if value is None:
+            self.state.detectors["dpms"] = False
+            log.warning("Sin conectores DRM en %s (no se puede leer DPMS): se usará GNOME",
+                        self.cfg["DPMS_SYSFS_ROOT"])
+            return
+        self.state.detectors["dpms"] = True
+        log.info("Detector DPMS activo (%s) -> pantalla=%s",
+                 self.dpms.detail(), "on" if value else "off")
+        if self.dpms_authoritative():
+            self.state.update(active=value, reason="arranque")
+        else:
+            log.info("SCREEN_SOURCE=%s: DPMS queda sólo como dato informativo",
+                     self.cfg["SCREEN_SOURCE"])
+
+    def _poll_dpms(self):
+        """Estado físico del monitor: cambia al instante, sin esperar al desbloqueo."""
+        if not self.state.detectors.get("dpms"):
+            self._setup_dpms()
+            return GLib.SOURCE_CONTINUE
+
+        value = self.dpms.any_on()
+        if value is None:
+            # Se desconectó todo (hotplug o VM sin video): volvemos a GNOME.
+            self.state.detectors["dpms"] = False
+            log.warning("Ya no hay conectores DRM; el estado vuelve a GNOME")
+        elif self.dpms_authoritative():
+            if self.state.update(active=value,
+                                 reason="monitor encendido" if value else "monitor apagado"):
+                self.publisher.notify("dpms")
         return GLib.SOURCE_CONTINUE
 
     def _setup_gnome(self):
@@ -422,6 +544,7 @@ class Agent:
             callback=self._on_active_changed,
         )
         self.state.update(active=active, reason="arranque")
+        self.state.update_locked(not active)
         self.state.detectors["gnome"] = True
         log.info("Detector GNOME activo (pantalla=%s)", "on" if active else "off")
 
@@ -429,6 +552,10 @@ class Agent:
         try:
             screensaver = bool(params.unpack()[0])
         except Exception:
+            return
+        # ActiveChanged = "hay candado", no "el monitor está apagado".
+        self.state.update_locked(screensaver)
+        if self.dpms_authoritative():
             return
         active = not screensaver
         if self.state.update(active=active, reason="pantalla" + (
@@ -506,6 +633,10 @@ def cmd_check(cfg):
         if not agent.state.detectors.get(name):
             print("FALLO detector '%s' NO activo (no se detectarán sus eventos)" % name)
             ok = False
+
+    if cfg["SCREEN_SOURCE"] in ("auto", "dpms") and not agent.state.detectors.get("dpms"):
+        print("AVISO sin DPMS: el estado seguirá al candado de GNOME (se enciende recién al "
+              "desbloquear)")
 
     ok = True
     if cfg["HA_URL"] and cfg["HA_TOKEN"]:

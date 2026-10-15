@@ -92,7 +92,39 @@ servicio de usuario, sin privilegios extra).
 | `AGENT_TOKEN` | vacío | Bearer para `/state`, `/events`, `/health` |
 | `DETECTORS` | `gnome,logind` | Qué señales escuchar |
 | `POLL_INTERVAL` | `30` | Segundos del sondeo de seguridad (reconcilia estado y reconecta detectores) |
+| `SCREEN_SOURCE` | `auto` | `auto` = DPMS si hay conectores, si no GNOME. `dpms` = sólo DPMS. `gnome` = sólo el candado |
+| `DPMS_POLL` | `2` | Segundos entre lecturas de `/sys/class/drm` |
 | `LOG_LEVEL` | `INFO` | `DEBUG` para ver cada señal |
+
+## Qué significa "pantalla encendida"
+
+`org.gnome.ScreenSaver` responde **activo mientras la sesión tenga candado**, así que
+con ese detector la pantalla recién se marca `on` cuando escribís la contraseña:
+mover el mouse no basta, y los LEDs quedan apagados hasta que desbloqueás.
+
+El agente usa por eso el **DPMS del kernel** (`/sys/class/drm/card*-*/dpms`), que
+refleja el estado físico del monitor y cambia en el instante en que se enciende,
+ esté la sesión bloqueada o no.
+
+```
+┌───────────────────────┐   mouse     ┌──────────┐   candado   ┌──────────┐
+│ Monitor encendido     │◀────────────│ GNOME    │◀───────────│ unlock   │
+│ (DPMS=On)  ← el que  │             │ScreenSaver│            │          │
+│  manda el estado      │             └──────────┘            └──────────┘
+└───────────────────────┘
+```
+
+| Atributo | Significado |
+|---|---|
+| `state` | `on` si el monitor está encendido (o, sin DPMS, si la sesión está desbloqueada) |
+| `locked` | La sesión tiene el candado puesto |
+| `suspended` | El equipo está suspendiendo/reanudando |
+| `screen_power` | Idéntico a `state`; explícito para condiciones |
+| `screen_source` | De dónde sale el estado: `auto`, `dpms` o `gnome` |
+| `detectors_active` | Qué detectores están vivos (watchdog) |
+
+Si no hay ningún conector DRM (alguna VM, un setup sin monitor), el agente avisa
+por log y cae automáticamente al detector de GNOME.
 
 ## API del agente
 
