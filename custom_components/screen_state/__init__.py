@@ -25,6 +25,7 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     SCAN_INTERVAL_SECONDS,
+    STREAM_READ_TIMEOUT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -77,11 +78,15 @@ class ScreenStateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         session = async_get_clientsession(self.hass)
         while True:
             try:
-                timeout = aiohttp.ClientTimeout(total=None, sock_connect=10)
+                timeout = aiohttp.ClientTimeout(
+                    total=None, sock_connect=10, sock_read=STREAM_READ_TIMEOUT
+                )
                 async with session.get(
                     f"{self.base_url}/events", headers=self.headers, timeout=timeout
                 ) as response:
                     response.raise_for_status()
+                    # Al (re)conectar, refrescamos de una: nada de esperar al sondeo.
+                    await self.async_request_refresh()
                     async for line in response.content:
                         if not line.startswith(b"data:"):
                             continue
@@ -94,7 +99,10 @@ class ScreenStateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 - reconexión automática
-                _LOGGER.debug("Stream SSE del agente interrumpido: %s", err)
+                _LOGGER.warning(
+                    "Stream SSE del agente %s interrumpido (%s): reintentando en 10 s",
+                    self.entry.data[CONF_HOST], err,
+                )
                 await asyncio.sleep(10)
 
     def start_stream(self) -> None:
